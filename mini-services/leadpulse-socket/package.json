@@ -1,0 +1,10 @@
+{
+  "name": "leadpulse-socket",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "while true; do bun --hot index.ts; echo '[supervisor] service exited, restarting in 1s...' >&2; sleep 1; done"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1"
+  }
+}

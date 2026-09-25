@@ -1,0 +1,352 @@
+// PlayBeat Lead Pulse — CRM schema.
+// Provider: MongoDB (Atlas cluster0.mfghk5u). Sandbox uses db `leadpulse_dev`,
+// production uses db `leadpulse`. Pre-Vercel SQLite schema is backed up at
+// scripts/backup-pre-vercel/schema.prisma.sqlite.bak (provider swap verified
+// 18/18 in scripts/probe_mongo_prisma.ts — groupBy/includes/unique/tx all OK).
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Identity & access ────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(cuid()) @map("_id")
+  email         String   @unique
+  passwordHash  String
+  name          String
+  phone         String?
+  role          String   @default("employee") // super_admin | admin | manager | employee | viewer
+  department    String?  // Sales | Support | Marketing | Operations
+  status        String   @default("active") // active | disabled
+  refreshVer    Int      @default(1) // bump to invalidate refresh tokens
+  presenceStatus String? // available | busy | on_call | away | offline (agent-set)
+  lastSeenAt    DateTime? // heartbeat — derived "online" = seen < 2 min ago
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  assignedLeads       Lead[]           @relation("LeadAssignee")
+  activities          Activity[]
+  notes               LeadNote[]
+  messages            Message[]
+  calls               Call[]
+  conversations       Conversation[]   @relation("ConvAssignee")
+  campaigns           Campaign[]       @relation("CampaignSender")
+  followups           FollowUp[]       @relation("FollowUpOwner")
+  importBatches       ImportBatch[]
+}
+
+// ─── Leads ────────────────────────────────────────────────────────────────────
+
+model Lead {
+  id            String    @id @default(cuid()) @map("_id")
+  firstName     String?
+  lastName      String?
+  company       String?
+  jobTitle      String?
+  country       String?
+  state         String?
+  city          String?
+  address       String?
+  website       String?
+  email         String?
+  emailStatus   String    @default("unknown") // valid | invalid | unknown | duplicate
+  whatsapp      String?   // E.164 normalized
+  whatsappNorm  String?   // digits-only E.164 for matching/uniqueness
+  phone         String?   // E.164 normalized
+  phoneNorm     String?
+  industry      String?
+  source        String    @default("manual") // csv_import | manual | webhook | campaign_reply
+  status        String    @default("new") // new | contacted | qualified | converted | archived | do_not_contact
+  score         Int       @default(0)
+  tags          String    @default("[]") // JSON string[]
+  customFields  String?   // JSON object
+  dedupeKey     String?   // email|whatsappNorm fingerprint at import time
+  importBatchId String?
+  assignedToId  String?
+  optedOut      Boolean   @default(false)
+  optedOutAt    DateTime?
+  lastContactAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  optOuts       OptOut[]
+
+  importBatch   ImportBatch?      @relation(fields: [importBatchId], references: [id])
+  assignedTo    User?             @relation("LeadAssignee", fields: [assignedToId], references: [id])
+  activities    Activity[]
+  notes         LeadNote[]
+  conversations Conversation[]
+  calls         Call[]
+  followups     FollowUp[]
+  recipients    CampaignRecipient[]
+
+  @@index([status])
+  @@index([assignedToId])
+  @@index([whatsappNorm])
+  @@index([createdAt])
+}
+
+model ImportBatch {
+  id            String   @id @default(cuid()) @map("_id")
+  filename      String
+  totalRows     Int      @default(0)
+  validRows     Int      @default(0)
+  invalidRows   Int      @default(0)
+  duplicates    Int      @default(0)
+  missingPhone  Int      @default(0)
+  missingWhats  Int      @default(0)
+  missingEmail  Int      @default(0)
+  errorSamples  String?  // JSON array of {row, error}
+  importedById  String?
+  createdAt     DateTime @default(now())
+
+  importedBy    User?  @relation(fields: [importedById], references: [id])
+  leads         Lead[]
+
+  @@index([createdAt])
+}
+
+// ─── CRM timeline & notes ─────────────────────────────────────────────────────
+
+model Activity {
+  id        String   @id @default(cuid()) @map("_id")
+  leadId    String
+  actorId   String?
+  type      String   // lead_imported | assigned | conversation_started | message_sent | message_received | call_logged | note_added | followup_scheduled | followup_completed | status_changed | tag_added | campaign_sent | opt_out | converted | lead_created
+  title     String
+  detail    String?
+  meta      String?  // JSON
+  createdAt DateTime @default(now())
+
+  lead   Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  actor  User? @relation(fields: [actorId], references: [id])
+
+  @@index([leadId, createdAt])
+  @@index([createdAt])
+}
+
+model LeadNote {
+  id        String   @id @default(cuid()) @map("_id")
+  leadId    String
+  authorId  String?
+  body      String
+  createdAt DateTime @default(now())
+
+  lead   Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  author User? @relation(fields: [authorId], references: [id])
+}
+
+// ─── WhatsApp conversations & messages ────────────────────────────────────────
+
+model Conversation {
+  id             String    @id @default(cuid()) @map("_id")
+  leadId         String
+  channel        String    @default("whatsapp")
+  waPhone        String?   // E.164 the conversation is held with
+  assignedToId   String?
+  lastMessageAt  DateTime?
+  lastMessagePreview String?
+  unreadCount    Int       @default(0)
+  status         String    @default("open") // open | pending | resolved | closed
+  priority       String    @default("normal") // low | normal | high | urgent
+  tags           String    @default("[]") // JSON string[]
+  waServiceWindowUntil DateTime? // 24h customer-service window estimate from last inbound
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignedTo User?    @relation("ConvAssignee", fields: [assignedToId], references: [id])
+  messages  Message[]
+
+  @@index([lastMessageAt])
+  @@index([assignedToId])
+}
+
+model Message {
+  id             String   @id @default(cuid()) @map("_id")
+  conversationId String
+  senderId       String?
+  direction      String   // inbound | outbound
+  kind           String   @default("text") // text | template | image | document | audio | system
+  body           String
+  mediaUrl       String?
+  templateId     String?
+  waMessageId    String?   // Mongo: nullable uniques are index-unsafe (nulls collide) — provider IDs are unique in practice; lookup via findFirst/updateMany
+  status         String   @default("queued") // queued | sent | delivered | read | failed
+  errorCode      String?
+  errorMessage   String?
+  metaJson       String?  // provider message metadata (filename, caption, mime, location, interactive payload, template name…)
+  campaignId     String?
+  createdAt      DateTime @default(now())
+  statusAt       DateTime?
+
+  conversation Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User?           @relation(fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@index([status])
+}
+
+// ─── Calls (honest activity records — never fabricated) ───────────────────────
+
+model Call {
+  id            String    @id @default(cuid()) @map("_id")
+  leadId        String
+  employeeId    String?
+  direction     String    @default("outbound") // outbound | inbound
+  method        String    // device_dialer | whatsapp_open | provider (records HOW the call was placed)
+  provider      String?   // null until a real telephony provider is connected
+  providerCallId String?  // provider-side call id (e.g. Twilio CallSid) — set ONLY after the provider really accepted the call
+  status        String    // completed | missed | busy | no_answer | failed | scheduled | ringing | in_progress
+  outcome       String?   // interested | not_interested | callback_requested | qualified | converted | wrong_number | do_not_contact | pending
+  durationSec   Int?      // null = unknown (never fabricated)
+  recordingUrl  String?   // null unless a real provider actually supplies one
+  notes         String?
+  scheduledFor  DateTime?
+  startedAt     DateTime?
+  endedAt       DateTime?
+  createdAt     DateTime  @default(now())
+
+  lead     Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  employee User? @relation(fields: [employeeId], references: [id])
+
+  @@index([leadId])
+  @@index([createdAt])
+}
+
+// ─── Campaigns ────────────────────────────────────────────────────────────────
+
+model Campaign {
+  id            String    @id @default(cuid()) @map("_id")
+  name          String
+  audienceJson  String?   // JSON filter {status?, country?, tag?, assignedToId?, leadIds?}
+  templateId    String?
+  bodyText      String?   // free-form fallback ONLY for open 24h service windows
+  senderId      String?
+  scheduleAt    DateTime?
+  dailyLimit    Int       @default(200)
+  minIntervalSec Int      @default(8) // throttle between sends
+  status        String    @default("draft") // draft | scheduled | running | paused | completed | cancelled
+  launchedAt    DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  template   Template?           @relation(fields: [templateId], references: [id])
+  sender     User?               @relation("CampaignSender", fields: [senderId], references: [id])
+  recipients CampaignRecipient[]
+}
+
+model CampaignRecipient {
+  id          String    @id @default(cuid()) @map("_id")
+  campaignId  String
+  leadId      String
+  status      String    @default("queued") // queued | sent | delivered | read | failed | replied | excluded_optout | excluded_invalid
+  renderedBody String?
+  waMessageId String?    // see Message.waMessageId note — nulls collide under Mongo unique index
+  error       String?
+  sentAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead     Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+}
+
+// ─── Templates ────────────────────────────────────────────────────────────────
+
+model Template {
+  id            String   @id @default(cuid()) @map("_id")
+  name          String
+  category      String   @default("utility") // marketing | utility | authentication
+  language      String   @default("en")
+  kind          String   @default("whatsapp_template") // whatsapp_template | free_form
+  bodyText      String
+  variables     String   @default("[]") // JSON string[] detected {{vars}}
+  approvalStatus String  @default("meta_pending") // free_form | meta_pending | meta_approved | meta_rejected
+  metaTemplateId String?
+  archived      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  campaigns Campaign[]
+}
+
+// ─── Follow-ups & tasks ───────────────────────────────────────────────────────
+
+model FollowUp {
+  id          String    @id @default(cuid()) @map("_id")
+  leadId      String
+  ownerId     String?
+  dueAt       DateTime
+  priority    String    @default("normal") // low | normal | high | urgent
+  notes       String?
+  status      String    @default("pending") // pending | completed | cancelled
+  outcome     String?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  lead   Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  owner  User? @relation("FollowUpOwner", fields: [ownerId], references: [id])
+
+  @@index([dueAt, status])
+  @@index([ownerId])
+}
+
+// ─── Compliance ───────────────────────────────────────────────────────────────
+
+model OptOut {
+  id          String    @id @default(cuid()) @map("_id")
+  channel     String    @default("whatsapp") // whatsapp | phone | email
+  value       String    // normalized E.164 or email
+  reason      String?   // stop_keyword | dnc_list | admin | complaint
+  source      String?   // webhook | manual | campaign
+  leadId      String?
+  optedOutAt  DateTime  @default(now())
+  optBackInAt DateTime?
+
+  lead Lead? @relation(fields: [leadId], references: [id])
+
+  @@unique([channel, value])
+}
+
+// ─── Integrations (secrets stored backend-side only, masked over the API) ─────
+
+model Integration {
+  id        String   @id @default(cuid()) @map("_id")
+  provider  String   @unique // whatsapp | telephony | email
+  configJson String  // JSON — accessToken etc. NEVER returned unmasked to any client
+  connected Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+// ─── Webhook + audit logs ─────────────────────────────────────────────────────
+
+model WebhookEvent {
+  id          String   @id @default(cuid()) @map("_id")
+  provider    String   @default("whatsapp")
+  kind        String   // message | status | verification_error
+  payloadJson String
+  processed   Boolean  @default(false)
+  error       String?
+  createdAt   DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(cuid()) @map("_id")
+  actorId   String?
+  actorName String?
+  action    String
+  entity    String?
+  entityId  String?
+  detail    String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
