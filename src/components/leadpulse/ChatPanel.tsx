@@ -14,6 +14,7 @@ export type ChatMsg = {
 };
 export type ChatConv = {
   id: string; waPhone: string | null; waServiceWindowUntil: string | null; unreadCount?: number;
+  channel?: string; // whatsapp | facebook — drives the composer hints
   leadId?: string; lead?: unknown; // full lead object rides along from GET /conversations/[id]
   assignedTo?: { id: string; name: string } | null;
 };

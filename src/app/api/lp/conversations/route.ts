@@ -28,6 +28,7 @@ export async function GET(req: Request) {
   if (filter === "warm") where.lead = { is: { status: { not: "archived" }, score: { gte: 40, lt: 70 } } };
   if (filter === "cold") where.lead = { is: { status: { not: "archived" }, score: { lt: 40 } } };
   if (filter === "whatsapp") where.channel = "whatsapp";
+  if (filter === "facebook") where.channel = "facebook";
   if (q) {
     where.OR = [
       { waPhone: { contains: q } },

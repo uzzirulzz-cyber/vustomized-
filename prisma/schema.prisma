@@ -59,6 +59,7 @@ model Lead {
   whatsappNorm  String?   // digits-only E.164 for matching/uniqueness
   phone         String?   // E.164 normalized
   phoneNorm     String?
+  fbPsid        String?   // Facebook Page-scoped ID (Messenger identity) — matched on inbound FB webhooks
   industry      String?
   source        String    @default("manual") // csv_import | manual | webhook | campaign_reply
   status        String    @default("new") // new | contacted | qualified | converted | archived | do_not_contact
@@ -147,7 +148,8 @@ model Conversation {
   id             String    @id @default(cuid()) @map("_id")
   leadId         String
   channel        String    @default("whatsapp")
-  waPhone        String?   // E.164 the conversation is held with
+  waPhone        String?   // E.164 the conversation is held with (whatsapp/phone channels)
+  fbPsid         String?   // Messenger PSID this conversation is held with (facebook channel)
   assignedToId   String?
   lastMessageAt  DateTime?
   lastMessagePreview String?

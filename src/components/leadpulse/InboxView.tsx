@@ -18,7 +18,7 @@ type ConvRow = {
 
 const FILTERS = [
   ["all", "All"], ["unread", "Unread"], ["mine", "Assigned to Me"],
-  ["whatsapp", "WhatsApp"], ["replies", "Campaign Replies"],
+  ["whatsapp", "WhatsApp"], ["facebook", "Facebook"], ["replies", "Campaign Replies"],
 ] as const;
 
 export default function InboxView({ user, openConversationId, setOpenConversationId }: {
@@ -119,7 +119,10 @@ export default function InboxView({ user, openConversationId, setOpenConversatio
               <button key={c.id} onClick={() => setOpenConversationId(c.id)}
                 className={`w-full text-left px-3 py-2.5 border-b border-slate-100 hover:bg-slate-50 transition ${openConversationId === c.id ? "bg-[#00a884]/[0.08]" : ""}`}>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-medium text-slate-900 truncate">{leadName(c.lead)}</span>
+                  <span className="text-xs font-medium text-slate-900 truncate">
+                    {leadName(c.lead)}
+                    {c.channel === "facebook" && <span className="ml-1.5 text-[8px] font-bold uppercase rounded bg-[#1877f2] text-white px-1 py-0.5 align-middle">FB</span>}
+                  </span>
                   {c.unreadCount > 0 && <span className="text-[9px] bg-[#00a884] text-white font-bold rounded-full px-1.5 min-w-4 text-center">{c.unreadCount}</span>}
                 </div>
                 <div className="text-[10px] text-slate-400 truncate mt-0.5">{c.lastMessagePreview || c.waPhone || "—"}</div>
@@ -165,7 +168,9 @@ export default function InboxView({ user, openConversationId, setOpenConversatio
             </div>
           </div>
           <div className="mt-4 pt-3 border-t border-slate-200 text-[10px] text-slate-400 leading-relaxed">
-            Messages send through the Meta WhatsApp Cloud API. Free-form text is deliverable inside the 24h customer-service window; to start a chat use an approved template.
+            {detail.conversation.channel === "facebook"
+              ? "Messages send through the Facebook Page (Messenger Send API). Free-form replies are deliverable inside the 24h standard messaging window opened by the customer's last message."
+              : "Messages send through the Meta WhatsApp Cloud API. Free-form text is deliverable inside the 24h customer-service window; to start a chat use an approved template."}
           </div>
         </div>
       )}

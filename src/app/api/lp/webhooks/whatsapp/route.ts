@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { getWhatsAppConfig } from "@/lib/lp/whatsapp";
+import { getFacebookConfig } from "@/lib/lp/facebook";
 import { logActivity } from "@/lib/lp/activity";
 import { emitToSocket } from "@/lib/lp/socket";
 import { normalizePhone } from "@/lib/lp/csv";
@@ -7,13 +8,17 @@ import { normalizePhone } from "@/lib/lp/csv";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// WhatsApp Cloud API webhook (spec §4) — Meta server-to-server. No user auth;
+// Meta webhook (spec §4 + §10) — Meta server-to-server. No user auth;
 // verified via hub.verify_token (GET) and processed IDEMPOTENTLY (POST):
 // every inbound message is de-duplicated by its provider message id, so Meta
 // retries never create duplicate bubbles.
 //
-// WhatsApp Cloud API
-//   ↓ Meta Webhook
+// Handles BOTH Meta webhook objects on the same endpoint (spec §6 unified
+// inbox):
+//   object=whatsapp_business_account → WhatsApp Cloud API messages/statuses
+//   object=page                      → Facebook Messenger messages/statuses
+//
+// Meta Webhook
 //   ↓ this controller (verification + normalization)
 //   ↓ MongoDB (WebhookEvent raw + Message normalized)
 //   ↓ socket emit (sandbox) / cursor polling (serverless)
@@ -23,9 +28,11 @@ export async function GET(req: Request) {
   const mode = url.searchParams.get("hub.mode");
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
-  const cfg = await getWhatsAppConfig();
-  if (mode === "subscribe" && token && token === cfg.webhookVerifyToken) {
-    return new Response(challenge || "", { status: 200 });
+  if (mode === "subscribe" && token) {
+    const [waCfg, fbCfg] = await Promise.all([getWhatsAppConfig(), getFacebookConfig()]);
+    if (token === waCfg.webhookVerifyToken || token === fbCfg.webhookVerifyToken) {
+      return new Response(challenge || "", { status: 200 });
+    }
   }
   return Response.json({ error: "verification failed" }, { status: 403 });
 }
@@ -133,7 +140,12 @@ function normalizeInbound(msg: WaInboundMessage): { kind: string; body: string; 
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => ({}))) as WaWebhookBody;
+  const body = (await req.json().catch(() => ({}))) as WaWebhookBody & { object?: string };
+  const object = body.object || "whatsapp_business_account";
+
+  // Facebook Page (Messenger) events share this endpoint (spec §6/§13/§14).
+  if (object === "page") return handleMessenger(body as unknown as FbWebhookBody);
+
   await db.webhookEvent.create({
     data: { provider: "whatsapp", kind: "payload", payloadJson: JSON.stringify(body).slice(0, 20000), processed: true },
   });
@@ -270,6 +282,215 @@ export async function POST(req: Request) {
           data: { provider: "whatsapp", kind: "message", payloadJson: JSON.stringify({ id: msg.id, type: msg.type, from }).slice(0, 5000), processed: true },
         });
       }
+    }
+  }
+
+  return Response.json({ success: true });
+}
+
+// ─── Facebook Page / Messenger (spec §13/§14) ────────────────────────────────
+
+type FbAttachment = {
+  type?: string; // image | video | audio | file | fallback | template
+  payload?: { url?: string; attachment_id?: string; title?: string; coordinates?: { lat?: number; long?: number } };
+};
+
+type FbMessagingEvent = {
+  sender?: { id?: string }; // PSID for user-sent events
+  recipient?: { id?: string }; // page id
+  timestamp?: number;
+  message?: {
+    mid?: string;
+    text?: string;
+    is_echo?: boolean;
+    is_deleted?: boolean;
+    attachments?: FbAttachment[];
+    reply_to?: { mid?: string };
+  };
+  postback?: { title?: string; payload?: string };
+  read?: { watermark?: number };
+  delivery?: { mids?: string[]; watermark?: number };
+  message_echo?: FbMessagingEvent["message"];
+};
+
+type FbWebhookBody = {
+  object?: string;
+  entry?: {
+    id?: string; // page id
+    time?: number;
+    messaging?: FbMessagingEvent[];
+    changes?: { field?: string; value?: Record<string, unknown> }[]; // feed/comments — logged only (spec §15 later)
+  }[];
+};
+
+function normalizeMessenger(msg: NonNullable<FbMessagingEvent["message"]>): { kind: string; body: string; mediaUrl: string | null; meta: Record<string, unknown> } {
+  const meta: Record<string, unknown> = {};
+  if (msg.reply_to?.mid) meta.replyToWaMessageId = msg.reply_to.mid;
+  const att = msg.attachments?.[0];
+  if (att) {
+    meta.attachmentType = att.type;
+    if (att.payload?.url) meta.attachmentUrl = att.payload.url;
+    switch (att.type) {
+      case "image": return { kind: "image", body: "📷 Photo", mediaUrl: att.payload?.url || null, meta };
+      case "video": return { kind: "video", body: "🎬 Video", mediaUrl: att.payload?.url || null, meta };
+      case "audio": return { kind: "audio", body: "🎙️ Voice message", mediaUrl: att.payload?.url || null, meta };
+      case "file": return { kind: "document", body: att.payload?.title || "📄 File", mediaUrl: att.payload?.url || null, meta };
+      default: return { kind: "unsupported", body: `[${att.type || "attachment"}]`, mediaUrl: att.payload?.url || null, meta };
+    }
+  }
+  return { kind: "text", body: msg.text || "", mediaUrl: null, meta };
+}
+
+async function handleMessenger(body: FbWebhookBody): Promise<Response> {
+  await db.webhookEvent.create({
+    data: { provider: "facebook", kind: "payload", payloadJson: JSON.stringify(body).slice(0, 20000), processed: true },
+  });
+
+  for (const entry of body.entry || []) {
+    // Feed events (comments/posts, spec §15) are logged raw for now — the
+    // Messenger inbox is the module that ships in this milestone.
+    for (const change of entry.changes || []) {
+      await db.webhookEvent.create({
+        data: { provider: "facebook", kind: change.field || "change", payloadJson: JSON.stringify(change.value || {}).slice(0, 10000), processed: false },
+      });
+    }
+
+    for (const ev of entry.messaging || []) {
+      const psid = ev.sender?.id || null;
+      const pageId = ev.recipient?.id || entry.id || null;
+      if (!psid) continue;
+
+      // ---- Read receipts / delivery confirmations for our outbound ----
+      if (ev.read?.watermark) {
+        await db.message.updateMany({
+          where: { conversation: { channel: "facebook", fbPsid: psid }, direction: "outbound", status: { in: ["sent", "delivered"] } },
+          data: { status: "read", statusAt: new Date() },
+        });
+        await db.webhookEvent.create({ data: { provider: "facebook", kind: "read", payloadJson: JSON.stringify(ev).slice(0, 2000), processed: true } });
+        continue;
+      }
+      if (ev.delivery) {
+        const mids = ev.delivery.mids || [];
+        if (mids.length) {
+          for (const mid of mids) {
+            await db.message.updateMany({ where: { waMessageId: mid, status: "sent" }, data: { status: "delivered", statusAt: new Date() } });
+          }
+        } else if (ev.delivery.watermark) {
+          await db.message.updateMany({
+            where: { conversation: { channel: "facebook", fbPsid: psid }, direction: "outbound", status: "sent" },
+            data: { status: "delivered", statusAt: new Date() },
+          });
+        }
+        await db.webhookEvent.create({ data: { provider: "facebook", kind: "delivery", payloadJson: JSON.stringify(ev).slice(0, 2000), processed: true } });
+        continue;
+      }
+
+      // ---- Echoes of our own sends (send API already recorded them) ----
+      if (ev.message?.is_echo) {
+        if (ev.message.mid) {
+          const exists = await db.message.findFirst({ where: { waMessageId: ev.message.mid }, select: { id: true } });
+          if (!exists) {
+            const norm = normalizeMessenger(ev.message);
+            const conv = await db.conversation.findFirst({ where: { channel: "facebook", fbPsid: psid, status: { not: "closed" } } });
+            if (conv) {
+              await db.message.create({
+                data: {
+                  conversationId: conv.id, direction: "outbound", kind: norm.kind, body: norm.body,
+                  mediaUrl: norm.mediaUrl, waMessageId: ev.message.mid, status: "sent", statusAt: new Date(),
+                  metaJson: Object.keys(norm.meta).length ? JSON.stringify(norm.meta) : null,
+                },
+              });
+            }
+          }
+        }
+        continue;
+      }
+
+      // ---- Inbound message or postback ----
+      const isPostback = Boolean(ev.postback);
+      const mid = ev.message?.mid || `postback_${ev.timestamp || Date.now()}_${psid}`;
+      // ── IDEMPOTENCY: Meta redelivers webhooks; skip anything already stored ──
+      const dupe = await db.message.findFirst({ where: { waMessageId: mid }, select: { id: true } });
+      if (dupe) continue;
+
+      const norm = isPostback
+        ? { kind: "interactive", body: ev.postback?.title || ev.postback?.payload || "[postback]", mediaUrl: null, meta: { postbackPayload: ev.postback?.payload } as Record<string, unknown> }
+        : normalizeMessenger(ev.message || {});
+      if (!isPostback && !ev.message) continue; // neither message nor postback — nothing actionable
+
+      let lead = await db.lead.findFirst({ where: { fbPsid: psid } });
+      if (!lead) {
+        lead = await db.lead.create({
+          data: {
+            fbPsid: psid,
+            source: "webhook",
+            status: "new",
+          },
+        });
+        await logActivity({ leadId: lead.id, type: "lead_created", title: `Lead auto-created from inbound Facebook Messenger (PSID ${psid}).` });
+      }
+
+      // ---- STOP keyword → suppression list (compliance §15) ----
+      if (!isPostback && norm.kind === "text" && STOP_RE.test(norm.body.trim())) {
+        await db.optOut.upsert({
+          where: { channel_value: { channel: "facebook", value: psid } },
+          create: { channel: "facebook", value: psid, reason: "stop_keyword", source: "webhook", leadId: lead.id },
+          update: { optBackInAt: null, optedOutAt: new Date() },
+        });
+        await db.lead.update({ where: { id: lead.id }, data: { optedOut: true, optedOutAt: new Date(), status: "do_not_contact" } });
+        await logActivity({ leadId: lead.id, type: "opt_out", title: `Customer replied "${norm.body.trim()}" on Messenger — OPTED OUT, suppressed from all campaigns.` });
+        continue;
+      }
+
+      let conversation = await db.conversation.findFirst({
+        where: { leadId: lead.id, channel: "facebook", status: { not: "closed" } },
+      });
+      if (!conversation) {
+        conversation = await db.conversation.create({
+          data: { leadId: lead.id, channel: "facebook", fbPsid: psid, assignedToId: lead.assignedToId },
+        });
+        await logActivity({ leadId: lead.id, type: "conversation_started", title: `Facebook Messenger conversation started (page ${pageId || "unknown"}).` });
+      }
+
+      const message = await db.message.create({
+        data: {
+          conversationId: conversation.id,
+          direction: "inbound",
+          kind: norm.kind,
+          body: norm.body,
+          mediaUrl: norm.mediaUrl,
+          metaJson: Object.keys(norm.meta).length ? JSON.stringify(norm.meta) : null,
+          waMessageId: mid,
+          status: "delivered",
+          statusAt: new Date(),
+        },
+      });
+
+      // Inbound reply counts as a "reply" for campaign recipients of this lead
+      await db.campaignRecipient.updateMany({
+        where: { leadId: lead.id, status: { in: ["sent", "delivered", "read"] } },
+        data: { status: "replied" },
+      });
+
+      // Messenger 24h standard messaging window opens on inbound (estimate only —
+      // Meta's own send rejection is the source of truth, surfaced verbatim).
+      const until = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await db.conversation.update({
+        where: { id: conversation.id },
+        data: {
+          lastMessageAt: new Date(),
+          lastMessagePreview: norm.body.slice(0, 120),
+          unreadCount: { increment: 1 },
+          waServiceWindowUntil: until,
+        },
+      });
+      await db.lead.update({ where: { id: lead.id }, data: { lastContactAt: new Date(), status: lead.status === "new" ? "contacted" : lead.status } });
+      await logActivity({ leadId: lead.id, type: "message_received", title: `Messenger reply: "${norm.body.slice(0, 80)}"` });
+      emitToSocket("message", { conversationId: conversation.id, message, leadId: lead.id });
+
+      await db.webhookEvent.create({
+        data: { provider: "facebook", kind: isPostback ? "postback" : "message", payloadJson: JSON.stringify({ mid, psid, pageId }).slice(0, 5000), processed: true },
+      });
     }
   }
 

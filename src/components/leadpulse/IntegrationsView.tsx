@@ -9,7 +9,23 @@ type MaskedWa = {
   webhookVerifyToken: string; hasAccessToken: boolean; accessTokenMask: string; connected: boolean;
 };
 
+type MaskedFb = {
+  pageId: string; pageName: string; graphVersion: string;
+  webhookVerifyToken: string; hasAccessToken: boolean; accessTokenMask: string;
+  lastVerifyOk: boolean; lastVerifyError: string; lastVerifyAt: string; connected: boolean;
+};
+
 export default function IntegrationsView({ user, onSaved }: { user: { id: string; role: string }; onSaved?: () => void }) {
+  return (
+    <div className="space-y-8 max-w-2xl">
+      <SectionTitle>Integrations — Meta Connection Center (spec §46)</SectionTitle>
+      <WhatsAppCard user={user} onSaved={onSaved} />
+      <FacebookCard user={user} onSaved={onSaved} />
+    </div>
+  );
+}
+
+function WhatsAppCard({ user, onSaved }: { user: { id: string; role: string }; onSaved?: () => void }) {
   const [cfg, setCfg] = useState<MaskedWa | null>(null);
   const [form, setForm] = useState({ phoneNumberId: "", wabaId: "", accessToken: "", graphVersion: "v21.0", webhookVerifyToken: "" });
   const [busy, setBusy] = useState(false);
@@ -41,15 +57,12 @@ export default function IntegrationsView({ user, onSaved }: { user: { id: string
   const verify = async () => {
     setBusy(true); setMsg(null);
     try {
-      const res = await fetch("/api/lp/integrations/whatsapp", { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("lp_token") || ""}` } });
-      // use api helper instead:
       const data = await api<{ ok: boolean; displayPhoneNumber?: string; verifiedName?: string; error?: string }>("/api/lp/integrations/whatsapp", { method: "PUT" });
       if (data.ok) {
         setMsg({ ok: true, text: `Meta verified the credentials: ${data.verifiedName || "WhatsApp account"} (${data.displayPhoneNumber || "number on file"}) — REAL Graph API response.` });
       } else {
         setMsg({ ok: false, text: `Meta rejected the credentials: ${data.error}` });
       }
-      void res;
     } catch (e) {
       setMsg({ ok: false, text: e instanceof Error ? e.message : "Verify failed" });
     } finally { setBusy(false); }
@@ -58,8 +71,8 @@ export default function IntegrationsView({ user, onSaved }: { user: { id: string
   const webhookUrl = typeof window !== "undefined" ? `${window.location.origin}/api/lp/webhooks/whatsapp` : "/api/lp/webhooks/whatsapp";
 
   return (
-    <div className="space-y-4 max-w-2xl">
-      <SectionTitle>Integrations — WhatsApp Business Platform (Meta Cloud API)</SectionTitle>
+    <div className="space-y-4">
+      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">WhatsApp Business Platform (Meta Cloud API)</div>
 
       {cfg && (
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs space-y-1.5">
@@ -109,6 +122,113 @@ export default function IntegrationsView({ user, onSaved }: { user: { id: string
           Point your Meta App → WhatsApp → Configuration → Webhook at this URL with the verify token above.
           Handled events: messages (inbound), statuses (sent / delivered / read / failed) — the CRM updates automatically,
           inbound replies open conversations, mark campaign replies, and STOP keywords feed the suppression list.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FacebookCard({ user, onSaved }: { user: { id: string; role: string }; onSaved?: () => void }) {
+  const [cfg, setCfg] = useState<MaskedFb | null>(null);
+  const [form, setForm] = useState({ pageId: "", accessToken: "", graphVersion: "v25.0", webhookVerifyToken: "" });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const canManage = user.role === "super_admin";
+
+  const load = useCallback(async () => {
+    const data = await api<{ facebook: MaskedFb }>("/api/lp/integrations/facebook");
+    setCfg(data.facebook);
+    setForm((f) => ({ ...f, graphVersion: data.facebook.graphVersion || "v25.0" }));
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const patch: Record<string, string> = {};
+      for (const [k, v] of Object.entries(form)) if (v.trim()) patch[k] = v.trim();
+      await api("/api/lp/integrations/facebook", { method: "POST", body: JSON.stringify(patch) });
+      await load();
+      setMsg({ ok: true, text: "Credentials saved (stored server-side only — never exposed to the frontend)." });
+      onSaved?.();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : "Save failed" });
+    } finally { setBusy(false); }
+  };
+
+  const verify = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const data = await api<{ ok: boolean; pageId?: string; pageName?: string; category?: string; error?: string }>("/api/lp/integrations/facebook", { method: "PUT" });
+      if (data.ok) {
+        setMsg({ ok: true, text: `Meta verified the Page: ${data.pageName || "Facebook Page"} (${data.pageId}${data.category ? ` · ${data.category}` : ""}) — REAL Graph API response.` });
+      } else {
+        setMsg({ ok: false, text: `Meta rejected the credentials: ${data.error}` });
+      }
+      await load();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : "Verify failed" });
+    } finally { setBusy(false); }
+  };
+
+  const webhookUrl = typeof window !== "undefined" ? `${window.location.origin}/api/lp/webhooks/meta` : "/api/lp/webhooks/meta";
+
+  return (
+    <div className="space-y-4">
+      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Facebook Page + Messenger</div>
+
+      {cfg && (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs space-y-1.5">
+          <div className="flex justify-between"><span className="text-slate-400">Status</span>
+            <span className={cfg.connected ? "text-emerald-600" : "text-rose-600"}>{cfg.connected ? "SAVED" : "NOT CONFIGURED"}</span></div>
+          <div className="flex justify-between"><span className="text-slate-400">Page</span><span className="text-slate-800">{cfg.pageName || "—"}</span></div>
+          <div className="flex justify-between"><span className="text-slate-400">Page ID</span><span className="text-slate-800 tabular-nums">{cfg.pageId || "—"}</span></div>
+          <div className="flex justify-between"><span className="text-slate-400">Graph version</span><span className="text-slate-800">{cfg.graphVersion}</span></div>
+          <div className="flex justify-between"><span className="text-slate-400">Access token</span><span className="text-slate-800">{cfg.accessTokenMask || "not set"}</span></div>
+          <div className="flex justify-between"><span className="text-slate-400">API Health (last verify)</span>
+            <span className={cfg.lastVerifyOk ? "text-emerald-600" : cfg.lastVerifyAt ? "text-rose-600" : "text-slate-400"}>
+              {cfg.lastVerifyOk ? "OK" : cfg.lastVerifyAt ? `FAILED — ${cfg.lastVerifyError}` : "not tested yet"}
+            </span></div>
+        </div>
+      )}
+
+      {canManage ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+          <div className="text-[10px] uppercase tracking-wider text-slate-400">Credentials — stored on the backend only (spec §46)</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input value={form.pageId} onChange={(e) => setForm((f) => ({ ...f, pageId: e.target.value }))} placeholder="Facebook Page ID" className="h-9 rounded-lg bg-slate-50 border border-slate-200 px-3 text-xs text-slate-900" />
+            <input value={form.accessToken} onChange={(e) => setForm((f) => ({ ...f, accessToken: e.target.value }))} placeholder="Page / System User access token" type="password" className="h-9 rounded-lg bg-slate-50 border border-slate-200 px-3 text-xs text-slate-900" />
+            <input value={form.webhookVerifyToken} onChange={(e) => setForm((f) => ({ ...f, webhookVerifyToken: e.target.value }))} placeholder="Webhook verify token (optional — default set)" className="h-9 rounded-lg bg-slate-50 border border-slate-200 px-3 text-xs text-slate-900 sm:col-span-2" />
+            <select value={form.graphVersion} onChange={(e) => setForm((f) => ({ ...f, graphVersion: e.target.value }))} className="h-9 rounded-lg bg-slate-50 border border-slate-200 px-2 text-xs text-slate-800">
+              {["v25.0", "v22.0", "v21.0", "v20.0", "v19.0"].map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </div>
+          <div className="flex gap-2">
+            <GoldButton disabled={busy} onClick={save}>Save Credentials</GoldButton>
+            <GhostButton disabled={busy} onClick={verify}>{busy ? "Testing…" : "Test against Meta (real)"}</GhostButton>
+          </div>
+          {msg && (
+            <div className={`text-[11px] rounded-lg px-3 py-2 border ${msg.ok ? "text-emerald-600 bg-emerald-500/10 border-emerald-400/20" : "text-rose-600 bg-rose-500/10 border-rose-400/20"}`}>
+              {msg.text}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+          Only the super admin can manage integration credentials.
+        </div>
+      )}
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
+        <div className="text-[10px] uppercase tracking-wider text-slate-400">Webhook (spec §14)</div>
+        <div className="text-xs text-slate-600">Callback URL (subscribe fields: messages, messaging_postbacks, message_deliveries, message_reads):</div>
+        <code className="block text-[11px] text-[#2563eb] bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 break-all">{webhookUrl}</code>
+        <div className="text-[10px] text-slate-400 leading-relaxed">
+          Point your Meta App → Webhooks → Page at this URL with the verify token above, then subscribe the Page
+          (Products → Messenger → Settings → Webhooks). Required app permissions: pages_messaging, pages_manage_metadata,
+          pages_read_engagement. Inbound messages, postbacks, delivery and read receipts open and update Facebook
+          conversations in the Unified Inbox automatically; STOP keywords feed the suppression list.
         </div>
       </div>
     </div>

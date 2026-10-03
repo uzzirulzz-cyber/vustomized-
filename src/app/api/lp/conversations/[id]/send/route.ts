@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { getAuthUser, can, jsonError } from "@/lib/lp/auth";
 import { getWhatsAppConfig, waSendText, waSendTemplate, waSendMedia, type MediaKind } from "@/lib/lp/whatsapp";
+import { getFacebookConfig, fbSendText } from "@/lib/lp/facebook";
 import { logActivity } from "@/lib/lp/activity";
 import { emitToSocket } from "@/lib/lp/socket";
 import { renderTemplate } from "@/lib/lp/render";
@@ -20,11 +21,69 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   });
   if (!conversation) return jsonError("Conversation not found", 404);
   const lead = conversation.lead;
-  const to = conversation.waPhone || lead.whatsapp;
-  if (!to) return jsonError("This lead has no WhatsApp number.", 400);
+  const isFacebook = conversation.channel === "facebook";
+  const to = isFacebook ? (conversation.fbPsid || lead.fbPsid || "") : (conversation.waPhone || lead.whatsapp || "");
+  if (!to) {
+    return jsonError(
+      isFacebook
+        ? "This conversation has no Messenger PSID — it can only be started by an inbound Facebook message."
+        : "This lead has no WhatsApp number.",
+      400
+    );
+  }
 
   if (lead.optedOut) {
     return jsonError("This contact has OPTED OUT — messaging is blocked by the suppression list (compliance §15).", 403);
+  }
+
+  if (isFacebook) {
+    // Messenger channel (spec §14): free-form text inside the 24h standard
+    // messaging window. Templates/media kinds are not wired for Messenger yet —
+    // honest refusal instead of a fake send.
+    if (body.kind && body.kind !== "text") {
+      return jsonError(`Messenger channel supports text sends only (got "${body.kind}"). Attachments/templates are not wired for Facebook yet.`, 400);
+    }
+    const messageBody = String(body.body || "").trim();
+    if (!messageBody) return jsonError("Message body required", 400);
+    const fbCfg = await getFacebookConfig();
+    if (!fbCfg.connected) {
+      return jsonError("Facebook Page not connected. Add credentials under Integrations → Facebook.", 409);
+    }
+    const result = await fbSendText(to, messageBody);
+    const message = await db.message.create({
+      data: {
+        conversationId: id,
+        senderId: user.id,
+        direction: "outbound",
+        kind: "text",
+        body: messageBody,
+        waMessageId: result.ok ? result.fbMessageId : null,
+        status: result.ok ? "sent" : "failed",
+        errorCode: result.ok ? null : String(result.errorCode ?? ""),
+        errorMessage: result.ok ? null : result.error,
+        statusAt: new Date(),
+      },
+    });
+    await db.conversation.update({
+      where: { id },
+      data: { lastMessageAt: new Date(), lastMessagePreview: messageBody.slice(0, 120), ...(result.ok ? { waServiceWindowUntil: new Date(Date.now() + 60 * 60 * 1000) } : {}) },
+    });
+    await db.lead.update({ where: { id: lead.id }, data: { lastContactAt: new Date() } });
+    await logActivity({
+      leadId: lead.id,
+      actorId: user.id,
+      type: "message_sent",
+      title: result.ok ? `Facebook message sent (PSID ${to}).` : `Facebook send FAILED (PSID ${to}) — ${result.error}`,
+      meta: { messageId: message.id, status: message.status },
+    });
+    emitToSocket("message", { conversationId: id, message });
+    if (!result.ok) {
+      return Response.json(
+        { error: `Provider rejected the message: ${result.error}`, providerError: true, message },
+        { status: 502 }
+      );
+    }
+    return Response.json({ ok: true, message });
   }
 
   const cfg = await getWhatsAppConfig();
