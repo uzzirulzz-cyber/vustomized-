@@ -195,7 +195,7 @@ export default function LeadsView({ user, employees, onOpenWhatsApp, onOpenConve
                     <td className="px-3 py-2 text-right whitespace-nowrap">
                       <button onClick={() => setOpenLeadId(l.id)} className="text-[#3d7ff7] hover:underline mr-2">Open</button>
                       {l.whatsapp && (
-                        <button onClick={() => onOpenWhatsApp(l.id)} disabled={openingChat} className="text-emerald-600 hover:underline mr-2 disabled:opacity-50" title="Message in CRM">WA</button>
+                        <button onClick={() => onOpenWhatsApp(l.id)} disabled={openingChat || l.optedOut} className="text-emerald-600 hover:underline mr-2 disabled:opacity-50" title={l.optedOut ? "Contact has opted out" : "Message in CRM"}>WA</button>
                       )}
                       {l.phone && <a href={`tel:${l.phone}`} className="text-slate-600 hover:underline" title="Click to Call (device action)">Call</a>}
                     </td>
