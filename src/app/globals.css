@@ -293,3 +293,13 @@
   .comms-dot::after, .cm-wave.on::before, .cm-wave.on::after, .cm-wave.ring::before,
   .cm-wave.ring::after, .cm-wave.hold::before, .cm-eq i { animation: none !important; }
 }
+
+
+@keyframes lpPageEnter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.lp-page-enter { animation: lpPageEnter .18s ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .lp-page-enter { animation: none; }
+}

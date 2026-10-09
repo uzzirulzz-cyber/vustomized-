@@ -36,7 +36,7 @@ const ACTIVITY_META: Record<string, { icon: string; color: string }> = {
 };
 
 export function LeadDetail({
-  leadId, user, employees, onClose, onChanged, onOpenConversation,
+  leadId, user, employees, onClose, onChanged, onOpenConversation, onOpenWhatsApp,
 }: {
   leadId: string;
   user: { id: string; role: string };
@@ -44,6 +44,7 @@ export function LeadDetail({
   onClose: () => void;
   onChanged?: () => void;
   onOpenConversation?: (conversationId: string) => void;
+  onOpenWhatsApp?: (leadId: string) => void;
 }) {
   const [data, setData] = useState<{
     lead: Lead; activities: Activity[]; notes: Note[]; conversations: Conv[]; calls: Call[]; followups: FollowUp[];
@@ -142,8 +143,6 @@ export function LeadDetail({
     }
   };
 
-  const waHref = lead.whatsapp ? `https://wa.me/${lead.whatsapp.replace(/\D/g, "")}` : null;
-
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex justify-end" onClick={onClose}>
       <div className="w-full max-w-2xl h-full bg-[#ffffff] border-l border-slate-200 overflow-y-auto" onClick={(e) => e.stopPropagation()}>
@@ -168,10 +167,10 @@ export function LeadDetail({
           {/* Quick actions (spec §23: Call → WhatsApp → Email → Note → Follow-up) */}
           <div className="flex flex-wrap gap-2 mt-3">
             <GhostButton onClick={() => setLogCallOpen((v) => !v)}>Log Call</GhostButton>
-            {waHref ? (
-              <a href={waHref} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600/80 hover:bg-emerald-500 text-slate-900 text-xs font-semibold px-3 h-9 transition">
-                Open WhatsApp <span className="text-[9px] opacity-70">(device)</span>
-              </a>
+            {lead.whatsapp ? (
+              <button onClick={() => onOpenWhatsApp?.(lead.id)} disabled={lead.optedOut} title={lead.optedOut ? "Contact has opted out" : "Open WhatsApp chat in the CRM"} className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 h-9 transition-all duration-200 shadow-sm hover:shadow-md active:translate-y-px disabled:opacity-50 disabled:pointer-events-none">
+                Message in CRM
+              </button>
             ) : (
               <span className="text-[10px] text-slate-400 self-center">no WhatsApp number</span>
             )}
