@@ -19,7 +19,13 @@ export const leadName = (l: { firstName?: string | null; lastName?: string | nul
 
 const STATUSES = ["new", "contacted", "qualified", "converted", "do_not_contact", "archived"];
 
-export default function LeadsView({ user, employees }: { user: { id: string; role: string; name: string }; employees: { id: string; name: string }[] }) {
+export default function LeadsView({ user, employees, onOpenWhatsApp, onOpenConversation, openingChat }: {
+  user: { id: string; role: string; name: string };
+  employees: { id: string; name: string }[];
+  onOpenWhatsApp: (leadId: string) => void;
+  onOpenConversation: (conversationId: string) => void;
+  openingChat: boolean;
+}) {
   const [leads, setLeads] = useState<LeadRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -189,7 +195,7 @@ export default function LeadsView({ user, employees }: { user: { id: string; rol
                     <td className="px-3 py-2 text-right whitespace-nowrap">
                       <button onClick={() => setOpenLeadId(l.id)} className="text-[#3d7ff7] hover:underline mr-2">Open</button>
                       {l.whatsapp && (
-                        <a href={`https://wa.me/${l.whatsapp.replace(/\D/g, "")}`} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline mr-2" title="Open WhatsApp (device action)">WA</a>
+                        <button onClick={() => onOpenWhatsApp(l.id)} disabled={openingChat} className="text-emerald-600 hover:underline mr-2 disabled:opacity-50" title="Message in CRM">WA</button>
                       )}
                       {l.phone && <a href={`tel:${l.phone}`} className="text-slate-600 hover:underline" title="Click to Call (device action)">Call</a>}
                     </td>
@@ -215,6 +221,8 @@ export default function LeadsView({ user, employees }: { user: { id: string; rol
           employees={employees}
           onClose={() => setOpenLeadId(null)}
           onChanged={() => void load()}
+          onOpenWhatsApp={(id) => { setOpenLeadId(null); onOpenWhatsApp(id); }}
+          onOpenConversation={(id) => { setOpenLeadId(null); onOpenConversation(id); }}
         />
       )}
     </div>
