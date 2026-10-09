@@ -168,7 +168,7 @@ export function LeadDetail({
           <div className="flex flex-wrap gap-2 mt-3">
             <GhostButton onClick={() => setLogCallOpen((v) => !v)}>Log Call</GhostButton>
             {lead.whatsapp ? (
-              <button onClick={() => onOpenWhatsApp?.(lead.id)} className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 h-9 transition-all duration-200 shadow-sm hover:shadow-md active:translate-y-px">
+              <button onClick={() => onOpenWhatsApp?.(lead.id)} disabled={lead.optedOut} title={lead.optedOut ? "Contact has opted out" : "Open WhatsApp chat in the CRM"} className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 h-9 transition-all duration-200 shadow-sm hover:shadow-md active:translate-y-px disabled:opacity-50 disabled:pointer-events-none">
                 Message in CRM
               </button>
             ) : (
